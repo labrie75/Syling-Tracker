@@ -12,6 +12,10 @@ _Active                             = false
 -- ========================================================================= --
 export {
   -- Addon API
+  SetCharCacheValue                   = API.SetCharCacheValue,
+  GetCharCacheValue                   = API.GetCharCacheValue,
+  RegisterSetting                     = API.RegisterSetting,
+  GetSetting                          = API.GetSetting,
   RegisterObservableContent           = API.RegisterObservableContent,
   ItemBar_AddItem                     = API.ItemBar_AddItem,
   ItemBar_RemoveItem                  = API.ItemBar_RemoveItem,
@@ -57,14 +61,16 @@ export {
   SetSelectedQuest                    = C_QuestLog.SetSelectedQuest
 }
 
-QUESTS_CONTENT_SUBJECT = RegisterObservableContent("quests", QuestsContentSubject)
+local QUESTS_CONTENT_SUBJECT = RegisterObservableContent("quests", QuestsContentSubject)
 
-QUESTS_CACHE = {}
-QUEST_HEADERS_CACHE = {}
-QUESTS_WITH_PROGRESS = {}
-QUESTS_WITH_ITEMS = {}
-QUESTS_REQUESTED = {}
+local QUESTS_CACHE = {}
+local QUEST_HEADERS_CACHE = {}
+local QUESTS_WITH_PROGRESS = {}
+local QUESTS_WITH_ITEMS = {}
+local QUESTS_REQUESTED = {}
 
+local QUEST_NEW_MAX_AGE = nil
+local QUEST_NEW_REMOVE_ON_PROGRESS = nil
 
 __ActiveOnEvents__  "PLAYER_ENTERING_WORLD" "QUEST_WATCH_LIST_CHANGED" "QUEST_ACCEPTED"
 function BecomeActiveOn(self, event, ...)
@@ -95,19 +101,13 @@ function OnActive(self)
   end
 
   _M:LoadQuests()
+
+  self:RunAgeUpdater()
 end
 
--- function GetQuestData(self, questID)
---   local questData = QUESTS_DATA[questID]
---   if not questData then 
---     questData = {}
---     QUESTS_DATA[questID] = questData
---   end
-
---   return questData
--- end
-
 function OnInactive(self)
+  self:StopAgeUpdater()
+
   wipe(QUESTS_CACHE)
   wipe(QUESTS_WITH_PROGRESS)
 
@@ -118,6 +118,7 @@ function OnInactive(self)
   ItemBar_Update()
 
   wipe(QUESTS_WITH_ITEMS)
+
 end
 
 function LoadQuests(self)
@@ -135,42 +136,51 @@ function LoadQuests(self)
 
     if questInfo.isHeader then 
       currentHeader = questInfo.title
-    elseif IsQuestWatched(questID) and not isHidden and not isBounty and not isTask then 
-      QUESTS_CACHE[questID]         = true 
-      QUEST_HEADERS_CACHE[questID]  = currentHeader
+    elseif not isHidden and not isBounty and not isTask then
+      local receivedTime = self:GetQuestReceivedTime(questID)
+      if not receivedTime then
+        receivedTime = time() 
+        self:SetQuestReceivedTime(questID, receivedTime)
+      end
 
-      local questData = QUESTS_CONTENT_SUBJECT:AcquireQuest(questID)
-      questData.questID = questID
-      questData.questLogIndex = questInfo.questLogIndex
-      questData.title = questInfo.title
-      questData.name = questInfo.title
-      questData.header = header
-      questData.category = header
-      questData.campaignID = questInfo.campaignID
-      questData.level = questInfo.level
-      questData.difficultyLevel = questInfo.difficultyLevel
-      questData.suggestedGroup = questInfo.suggestedGroup
-      questData.frequency = questInfo.frequency
-      questData.isHeader = questInfo.isHeader
-      questData.isCollapsed = questInfo.isCollapsed
-      questData.startEvent = questInfo.startEvent
-      questData.isTask = questInfo.isTask
-      questData.isBounty = questInfo.isBounty
-      questData.isScaling = questInfo.isScaling
-      questData.isOnMap = questInfo.isOnMap
-      questData.hasLocalPOI = questInfo.hasLocalPOI
-      questData.isHidden = questInfo.isHidden
-      questData.isAutoComplete = questInfo.isAutoComplete
-      questData.overridesSortOrder = questInfo.overridesSortOrder
-      questData.readyForTranslation = questInfo.readyForTranslation
+      if IsQuestWatched(questID) then
+        QUESTS_CACHE[questID]         = true 
+        QUEST_HEADERS_CACHE[questID]  = currentHeader
 
-      QUESTS_REQUESTED[questID] = true 
-      RequestLoadQuestByID(questID)
+        local questData = QUESTS_CONTENT_SUBJECT:AcquireQuest(questID)
+        questData.questID = questID
+        questData.questLogIndex = questInfo.questLogIndex
+        questData.title = questInfo.title
+        questData.name = questInfo.title
+        questData.header = header
+        questData.category = header
+        questData.campaignID = questInfo.campaignID
+        questData.level = questInfo.level
+        questData.difficultyLevel = questInfo.difficultyLevel
+        questData.suggestedGroup = questInfo.suggestedGroup
+        questData.frequency = questInfo.frequency
+        questData.isHeader = questInfo.isHeader
+        questData.isCollapsed = questInfo.isCollapsed
+        questData.startEvent = questInfo.startEvent
+        questData.isTask = questInfo.isTask
+        questData.isBounty = questInfo.isBounty
+        questData.isScaling = questInfo.isScaling
+        questData.isOnMap = questInfo.isOnMap
+        questData.hasLocalPOI = questInfo.hasLocalPOI
+        questData.isHidden = questInfo.isHidden
+        questData.isAutoComplete = questInfo.isAutoComplete
+        questData.overridesSortOrder = questInfo.overridesSortOrder
+        questData.readyForTranslation = questInfo.readyForTranslation
+
+        QUESTS_REQUESTED[questID] = true 
+        RequestLoadQuestByID(questID)
+      end
     end
   end
 end
 
 function UpdateQuest(self, questID)
+  local hasChanged = false
   local isFailed = IsFailed(questID)
   local title = GetQuestName(questID)
   local level = GetQuestDifficultyLevel(questID)
@@ -202,8 +212,18 @@ function UpdateQuest(self, questID)
 
   local questData = QUESTS_CONTENT_SUBJECT:AcquireQuest(questID)
 
+  if questData.numObjectives ~= numObjectives then 
+    hasChanged = true
+  elseif questData.isComplete ~= isComplete then 
+    hasChanged = true
+  elseif questData.isFailed ~= isFailed then 
+    hasChanged = true
+  end
+
   questData.questID = questID
   questData.questLogIndex = questLogIndex
+  questData.isNew = GetCharCacheValue("newquests", questID)
+  questData.age = self:GetQuestAge(questID)
   questData.isFailed = isFailed
   questData.title = title
   questData.name = title
@@ -353,6 +373,11 @@ function UpdateQuest(self, questID)
     for index = 1, numObjectives do 
       local objectiveData = questData:AcquireObjective(objectiveCount + 1)
       local text, oType, finished = GetQuestObjectiveInfo(questID, index, false)
+
+      if objectiveData.text ~= text then 
+        hasChanged = true
+      end
+
       objectiveData.text = text 
       objectiveData.type = oType 
       objectiveData.isCompleted = finished 
@@ -391,6 +416,11 @@ function UpdateQuest(self, questID)
 
   questData:SetObjectivesCount(objectiveCount)
 
+  if QUEST_NEW_REMOVE_ON_PROGRESS and hasChanged and questData.isNew and questData.age > 5 then
+    questData.isNew = false
+     SetCharCacheValue("newquests", questID, false)
+  end
+
   -- if totalTime and elapsedTime then 
   --   local lastObjective = questData:GetObjectiveData(objectiveCount)
   --   lastObjective.hasTimer = true
@@ -428,6 +458,9 @@ function QUEST_ACCEPTED(questID)
     return 
   end 
 
+  _M:SetQuestReceivedTime(questID, time())
+
+  SetCharCacheValue("newquests", questID, true)
 
   -- Add it in the quest watched 
   if GetCVarBool("autoQuestWatch") and GetNumQuestWatches() < Constants.QuestWatchConsts.MAX_QUEST_WATCHES then
@@ -463,6 +496,8 @@ function QUEST_WATCH_LIST_CHANGED(questID, isAdded)
 
     -- QUESTS_CONTENT_SUBJECT:RemoveQuestData(questID)
     QUESTS_CONTENT_SUBJECT.quests[questID] = nil
+
+    SetCharCacheValue("newquests", questID, nil)
   end
 end
 
@@ -566,6 +601,88 @@ function UpdateDistance()
       questData.distance = math.sqrt(distanceSq)
     end
   end
+end
+
+local AGE_UPDATER_TOKEN = 0
+local AGE_UPDATER_ENABLED = false
+
+__Async__()
+__SystemEvent__()
+function RunAgeUpdater(self)
+  if AGE_UPDATER_ENABLED then 
+    return 
+  end
+
+  AGE_UPDATER_ENABLED = true 
+
+  local token = AGE_UPDATER_TOKEN + 1
+  AGE_UPDATER_TOKEN = token
+
+  while AGE_UPDATER_ENABLED and token == AGE_UPDATER_TOKEN do
+    for questID in pairs(QUESTS_CACHE) do 
+      local age = self:GetQuestAge(questID)
+  
+      if age then 
+        local questData = QUESTS_CONTENT_SUBJECT:AcquireQuest(questID)
+        questData.age = age
+
+        if questData.isNew and QUEST_NEW_MAX_AGE > 0 and age > QUEST_NEW_MAX_AGE then
+          questData.isNew = false
+          SetCharCacheValue("newquests", questID, false)
+        end
+      end
+    end
+
+    Delay(1)
+  end
+end
+
+function StopAgeUpdater(self)
+  AGE_UPDATER_ENABLED = false
+end
+
+
+function GetQuestReceivedTime(self, questID)
+  return GetCharCacheValue("questsReceivedTime", questID)
+end
+
+function GetQuestReceivedTimePlayed(self, questID)
+  return GetCharCacheValue("questsReceivedTimePlayed", questID)
+end
+
+function GetQuestAge(self, questID)
+  local receivedTimePlayed = self:GetQuestReceivedTimePlayed(questID)
+  if not receivedTimePlayed then
+    return 9999999
+  end
+
+  return Utils.GetTimePlayed() - receivedTimePlayed
+end
+
+function SetQuestReceivedTime(self, questID, receivedTime)
+  local timePlayed = Utils.GetTimePlayed()
+
+  if timePlayed == 0 then 
+    return 
+  end
+
+  SetCharCacheValue("questsReceivedTime", questID, receivedTime)
+
+  if receivedTime then
+    SetCharCacheValue("questsReceivedTimePlayed", questID, timePlayed)
+  else
+    SetCharCacheValue("questsReceivedTimePlayed", questID, nil)
+  end
+end
+
+function OnLoad(self)
+  RegisterSetting("questNewMaxAge", 600, function(maxAge) QUEST_NEW_MAX_AGE = maxAge end)
+  RegisterSetting("questNewRemoveOnProgress", true, function(removeOnProgress) QUEST_NEW_REMOVE_ON_PROGRESS = removeOnProgress end)
+end
+
+function OnEnable(self)
+  QUEST_NEW_MAX_AGE = GetSetting("questNewMaxAge")
+  QUEST_NEW_REMOVE_ON_PROGRESS = GetSetting("questNewRemoveOnProgress")
 end
 -- ========================================================================= --
 -- Debug Utils Tools

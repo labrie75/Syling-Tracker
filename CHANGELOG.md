@@ -1,4 +1,43 @@
-# 2.9.12
+# 2.10.1
+
+##### MoP Classic
+
+###### NEW
+
+- Added the support of **"new"** indicator for quests.
+
+---
+
+## 2.10.0
+
+###### NEW
+
+- Quests can now show a **"new"** indicator.
+- Added settings to choose when a quest stops being marked as new.
+
+**Note:** This feature is currently only available on Retail. Support for Classic and MoP Classic will be added in a future update.
+
+---
+
+## 2.9.14
+
+##### MoP Classic
+
+###### FIXES
+
+- Fixed an error when enabling the advanced visibility rules for trackers.
+
+---
+
+## 2.9.13
+
+###### FIXES
+
+- Fixed an error when loading in a world quest zone. ([ticket #178](https://github.com/Skamer/Syling-Tracker/issues/178))
+
+---
+
+## 2.9.12
 
 - Added koKR locales.
 
